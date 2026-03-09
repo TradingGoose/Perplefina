@@ -15,7 +15,9 @@ services:
       context: .
       dockerfile: app.dockerfile
     environment:
-      - SEARXNG_API_URL=http://searxng:8080
+      - SEARXNG_API_URL=${SEARXNG_API_URL:-http://searxng:8080}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+      - DEEPSEEK=${DEEPSEEK:-}
       - DATA_DIR=/home/perplexica
     ports:
       - 3000:3000

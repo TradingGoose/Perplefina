@@ -7,6 +7,28 @@ if (typeof window === 'undefined') {
   // We're on the server
   fs = require('fs');
   path = require('path');
+  const dotenv = require('dotenv');
+  const envFiles = [];
+
+  if (process.env.NODE_ENV) {
+    envFiles.push(`.env.${process.env.NODE_ENV}.local`);
+  }
+
+  envFiles.push('.env.local');
+
+  if (process.env.NODE_ENV) {
+    envFiles.push(`.env.${process.env.NODE_ENV}`);
+  }
+
+  envFiles.push('.env');
+
+  for (const envFile of envFiles) {
+    const envPath = path.join(process.cwd(), envFile);
+
+    if (fs.existsSync(envPath)) {
+      dotenv.config({ path: envPath, override: false });
+    }
+  }
 }
 
 const configFileName = 'config.toml';
@@ -86,7 +108,10 @@ export const getSearxngApiEndpoint = () =>
 
 export const getOllamaApiEndpoint = () => loadConfig().MODELS.OLLAMA.API_URL;
 
-export const getDeepseekApiKey = () => loadConfig().MODELS.DEEPSEEK.API_KEY;
+export const getDeepseekApiKey = () =>
+  process.env.DEEPSEEK_API_KEY ||
+  process.env.DEEPSEEK ||
+  loadConfig().MODELS.DEEPSEEK.API_KEY;
 
 export const getAimlApiKey = () => loadConfig().MODELS.AIMLAPI.API_KEY;
 
