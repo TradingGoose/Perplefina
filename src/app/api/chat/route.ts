@@ -17,6 +17,9 @@ import { createCustomModel, validateCustomModel } from '@/lib/providers/customMo
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
+// Hard-coded timeout limit for API responses (175 seconds)
+const API_RESPONSE_TIMEOUT_MS = 175000; // 175 seconds
+
 type Message = {
   messageId: string;
   chatId: string;
@@ -54,6 +57,64 @@ const handleEmitterEvents = async (
   let recievedMessage = '';
   let sources: any[] = [];
   let writerClosed = false;
+  let timeoutId: NodeJS.Timeout;
+
+  // Set up timeout to force close after 175 seconds
+  timeoutId = setTimeout(() => {
+    if (!writerClosed) {
+      console.log(`[Chat Timeout] Forcing stream closure after ${API_RESPONSE_TIMEOUT_MS / 1000}s`);
+      
+      // Send timeout notification
+      try {
+        writer.write(
+          encoder.encode(
+            JSON.stringify({
+              type: 'timeout',
+              data: 'Response timeout reached - stopping generation',
+              messageId: aiMessageId,
+              partial: true,
+              timeout: API_RESPONSE_TIMEOUT_MS,
+            }) + '\n',
+          ),
+        ).catch(() => {});
+        
+        writer.write(
+          encoder.encode(
+            JSON.stringify({
+              type: 'messageEnd',
+              messageId: aiMessageId,
+              partial: true,
+            }) + '\n',
+          ),
+        ).then(() => {
+          writer.close().catch(() => {});
+        }).catch(() => {});
+      } catch (error) {
+        // Writer already closed
+      }
+      
+      writerClosed = true;
+      stream.removeAllListeners();
+      
+      // Save partial message to database
+      if (recievedMessage) {
+        db.insert(messagesSchema)
+          .values({
+            content: recievedMessage + '\n\n[Response truncated due to timeout]',
+            chatId: chatId,
+            messageId: aiMessageId,
+            role: 'assistant',
+            metadata: JSON.stringify({
+              createdAt: new Date(),
+              partial: true,
+              timeout: true,
+              ...(sources && sources.length > 0 && { sources }),
+            }),
+          })
+          .execute();
+      }
+    }
+  }, API_RESPONSE_TIMEOUT_MS);
 
   stream.on('data', (data) => {
     if (writerClosed) return;
@@ -97,6 +158,8 @@ const handleEmitterEvents = async (
   });
   
   stream.on('end', () => {
+    clearTimeout(timeoutId); // Clear timeout if stream ends normally
+    
     if (!writerClosed) {
       try {
         writer.write(
@@ -123,20 +186,25 @@ const handleEmitterEvents = async (
       }
     }
 
-    db.insert(messagesSchema)
-      .values({
-        content: recievedMessage,
-        chatId: chatId,
-        messageId: aiMessageId,
-        role: 'assistant',
-        metadata: JSON.stringify({
-          createdAt: new Date(),
-          ...(sources && sources.length > 0 && { sources }),
-        }),
-      })
-      .execute();
+    // Only save to DB if not already saved by timeout
+    if (!writerClosed || recievedMessage) {
+      db.insert(messagesSchema)
+        .values({
+          content: recievedMessage,
+          chatId: chatId,
+          messageId: aiMessageId,
+          role: 'assistant',
+          metadata: JSON.stringify({
+            createdAt: new Date(),
+            ...(sources && sources.length > 0 && { sources }),
+          }),
+        })
+        .execute();
+    }
   });
   stream.on('error', (data) => {
+    clearTimeout(timeoutId); // Clear timeout on error
+    
     if (!writerClosed) {
       try {
         const parsedData = JSON.parse(data);

@@ -30,6 +30,9 @@ interface ChatRequestBody {
   includeVideos?: boolean;
 }
 
+// Hard-coded timeout limit for API responses (175 seconds)
+const API_RESPONSE_TIMEOUT_MS = 175000; // 175 seconds
+
 export const POST = async (req: Request) => {
   try {
     // Log request origin (only in development)
@@ -40,26 +43,26 @@ export const POST = async (req: Request) => {
       const forwardedFor = req.headers.get('x-forwarded-for');
       const realIp = req.headers.get('x-real-ip');
       const ip = forwardedFor || realIp || 'unknown';
-      
+
       console.log('=== Incoming Search Request ===');
       console.log('Origin:', origin);
       console.log('Referer:', referer);
       console.log('IP:', ip);
       console.log('User-Agent:', userAgent);
       console.log('Timestamp:', new Date().toISOString());
-      
+
       const body: ChatRequestBody = await req.json();
-      
+
       console.log('Focus Mode:', body.focusMode);
       console.log('Query:', body.query);
       console.log('Optimization:', body.optimizationMode || 'balanced');
       console.log('Custom AI:', body.chatModel ? `${body.chatModel.provider}/${body.chatModel.model}` : 'default');
       console.log('================================');
-      
+
       // Re-parse body since we already consumed it
       req = new Request(req, { body: JSON.stringify(body) });
     }
-    
+
     const body: ChatRequestBody = await req.json();
 
     if (!body.focusMode || !body.query) {
@@ -99,13 +102,13 @@ export const POST = async (req: Request) => {
     } else {
       // Use default configured models
       const chatModelProviders = await getAvailableChatModelProviders();
-      
+
       const chatModelProvider =
         body.chatModel?.provider || Object.keys(chatModelProviders)[0];
       const chatModel =
         body.chatModel?.model ||
         Object.keys(chatModelProviders[chatModelProvider] || {})[0];
-      
+
       if (
         chatModelProviders[chatModelProvider] &&
         chatModelProviders[chatModelProvider][chatModel]
@@ -132,7 +135,7 @@ export const POST = async (req: Request) => {
     let embeddings: Embeddings | null = null;
     if (body.optimizationMode === 'balanced') {
       const embeddingProviders = await getAvailableEmbeddingModelProviders();
-      
+
       // Try to get the first available embedding model from system configuration
       for (const provider of Object.keys(embeddingProviders)) {
         const models = embeddingProviders[provider];
@@ -166,8 +169,25 @@ export const POST = async (req: Request) => {
         ) => {
           let message = '';
           let sources: any[] = [];
+          let isResolved = false;
+
+          // Set up timeout to return partial response after 170 seconds
+          const timeoutId = setTimeout(() => {
+            if (!isResolved) {
+              isResolved = true;
+              emitter.removeAllListeners();
+              console.log(`[API Timeout] Returning partial response after ${API_RESPONSE_TIMEOUT_MS / 1000}s`);
+              resolve(Response.json({
+                message: message || 'Response timeout - returning partial content',
+                sources,
+                partial: true,
+                timeout: true
+              }, { status: 200 }));
+            }
+          }, API_RESPONSE_TIMEOUT_MS);
 
           emitter.on('data', (data: string) => {
+            if (isResolved) return;
             try {
               const parsedData = JSON.parse(data);
               if (parsedData.type === 'response') {
@@ -176,26 +196,38 @@ export const POST = async (req: Request) => {
                 sources = parsedData.data;
               }
             } catch (error) {
-              reject(
-                Response.json(
-                  { message: 'Error parsing data' },
-                  { status: 500 },
-                ),
-              );
+              if (!isResolved) {
+                isResolved = true;
+                clearTimeout(timeoutId);
+                reject(
+                  Response.json(
+                    { message: 'Error parsing data' },
+                    { status: 500 },
+                  ),
+                );
+              }
             }
           });
 
           emitter.on('end', () => {
-            resolve(Response.json({ message, sources }, { status: 200 }));
+            if (!isResolved) {
+              isResolved = true;
+              clearTimeout(timeoutId);
+              resolve(Response.json({ message, sources }, { status: 200 }));
+            }
           });
 
           emitter.on('error', (error: any) => {
-            reject(
-              Response.json(
-                { message: 'Search error', error },
-                { status: 500 },
-              ),
-            );
+            if (!isResolved) {
+              isResolved = true;
+              clearTimeout(timeoutId);
+              reject(
+                Response.json(
+                  { message: 'Search error', error },
+                  { status: 500 },
+                ),
+              );
+            }
           });
         },
       );
@@ -209,6 +241,8 @@ export const POST = async (req: Request) => {
     const stream = new ReadableStream({
       start(controller) {
         let sources: any[] = [];
+        let isStreamClosed = false;
+        let partialMessage = '';
 
         controller.enqueue(
           encoder.encode(
@@ -219,21 +253,59 @@ export const POST = async (req: Request) => {
           ),
         );
 
+        // Set up timeout to close stream after 170 seconds
+        const timeoutId = setTimeout(() => {
+          if (!isStreamClosed && !signal.aborted) {
+            isStreamClosed = true;
+            emitter.removeAllListeners();
+            console.log(`[Stream Timeout] Closing stream after ${API_RESPONSE_TIMEOUT_MS / 1000}s`);
+
+            // Send timeout notification
+            try {
+              controller.enqueue(
+                encoder.encode(
+                  JSON.stringify({
+                    type: 'timeout',
+                    data: 'Response timeout reached - stream closed',
+                    partial: true,
+                    message: partialMessage,
+                    timeout: API_RESPONSE_TIMEOUT_MS,
+                  }) + '\n',
+                ),
+              );
+              controller.enqueue(
+                encoder.encode(
+                  JSON.stringify({
+                    type: 'done',
+                    partial: true,
+                  }) + '\n',
+                ),
+              );
+              controller.close();
+            } catch (error) {
+              // Controller might already be closed
+            }
+          }
+        }, API_RESPONSE_TIMEOUT_MS);
+
         signal.addEventListener('abort', () => {
+          clearTimeout(timeoutId);
+          isStreamClosed = true;
           emitter.removeAllListeners();
 
           try {
             controller.close();
-          } catch (error) {}
+          } catch (error) { }
         });
 
         emitter.on('data', (data: string) => {
-          if (signal.aborted) return;
+          if (signal.aborted || isStreamClosed) return;
 
           try {
             const parsedData = JSON.parse(data);
 
             if (parsedData.type === 'response') {
+              partialMessage += parsedData.data;
               controller.enqueue(
                 encoder.encode(
                   JSON.stringify({
@@ -254,12 +326,17 @@ export const POST = async (req: Request) => {
               );
             }
           } catch (error) {
-            controller.error(error);
+            if (!isStreamClosed) {
+              controller.error(error);
+            }
           }
         });
 
         emitter.on('end', () => {
-          if (signal.aborted) return;
+          if (signal.aborted || isStreamClosed) return;
+
+          isStreamClosed = true;
+          clearTimeout(timeoutId);
 
           controller.enqueue(
             encoder.encode(
@@ -272,8 +349,10 @@ export const POST = async (req: Request) => {
         });
 
         emitter.on('error', (error: any) => {
-          if (signal.aborted) return;
+          if (signal.aborted || isStreamClosed) return;
 
+          isStreamClosed = true;
+          clearTimeout(timeoutId);
           controller.error(error);
         });
       },

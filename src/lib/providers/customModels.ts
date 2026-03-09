@@ -32,8 +32,9 @@ const PROVIDER_MODELS: Record<string, string[]> = {
 };
 
 export function createCustomModel(config: CustomModelConfig): BaseChatModel {
-  const { provider, model, apiKey, baseUrl, temperature = 0.7 } = config;
-  
+  const { provider, model, apiKey, baseUrl } = config;
+  const configTemperature = config.temperature;
+
   // Normalize provider name to lowercase for comparison
   const normalizedProvider = provider?.toLowerCase();
 
@@ -42,7 +43,7 @@ export function createCustomModel(config: CustomModelConfig): BaseChatModel {
     return new ChatAnthropic({
       apiKey: apiKey,
       modelName: model,
-      temperature: temperature,
+      temperature: configTemperature ?? 0.7,
       anthropicApiUrl: baseUrl || PROVIDER_BASE_URLS.claude,
     }) as unknown as BaseChatModel;
   }
@@ -52,7 +53,7 @@ export function createCustomModel(config: CustomModelConfig): BaseChatModel {
     return new ChatGoogleGenerativeAI({
       apiKey: apiKey,
       model: model,
-      temperature: temperature,
+      temperature: configTemperature ?? 0.7,
       // Google doesn't use baseURL in the same way
     }) as unknown as BaseChatModel;
   }
@@ -62,7 +63,7 @@ export function createCustomModel(config: CustomModelConfig): BaseChatModel {
     return new ChatOpenAI({
       apiKey: apiKey,
       modelName: model,
-      temperature: temperature,
+      temperature: configTemperature ?? 0.7,
       configuration: {
         baseURL: baseUrl || PROVIDER_BASE_URLS.deepseek,
       },
@@ -74,7 +75,7 @@ export function createCustomModel(config: CustomModelConfig): BaseChatModel {
     return new ChatOpenAI({
       apiKey: apiKey,
       modelName: model,
-      temperature: temperature,
+      temperature: configTemperature ?? 0.7,
       maxTokens: 4000, // Default max tokens to prevent credit issues
       configuration: {
         baseURL: baseUrl || PROVIDER_BASE_URLS.openrouter,
@@ -88,10 +89,14 @@ export function createCustomModel(config: CustomModelConfig): BaseChatModel {
 
   // Handle OpenAI explicitly
   if (normalizedProvider === 'openai') {
+    const defaultOpenAITemperature =
+      configTemperature ?? (model.toLowerCase().includes('gpt-5') ? 1 : 0.7);
+
     return new ChatOpenAI({
       apiKey: apiKey,
       modelName: model,
-      temperature: temperature,
+      temperature: defaultOpenAITemperature,
+      useResponsesApi: true,
       configuration: {
         baseURL: baseUrl || PROVIDER_BASE_URLS.openai,
       },
@@ -102,7 +107,7 @@ export function createCustomModel(config: CustomModelConfig): BaseChatModel {
   return new ChatOpenAI({
     apiKey: apiKey,
     modelName: model,
-    temperature: temperature,
+    temperature: configTemperature ?? 0.7,
     configuration: {
       baseURL: baseUrl || PROVIDER_BASE_URLS[provider] || 'https://api.openai.com/v1',
     },
