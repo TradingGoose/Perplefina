@@ -1,8 +1,13 @@
-import db from '@/lib/db';
+import { loadPersistence } from '@/lib/persistence';
 
 export const GET = async (req: Request) => {
   try {
-    let chats = await db.query.chats.findMany();
+    const persistence = await loadPersistence();
+    if (!persistence) {
+      return Response.json({ chats: [] }, { status: 200 });
+    }
+
+    let chats = await persistence.db.query.chats.findMany();
     chats = chats.reverse();
     return Response.json({ chats: chats }, { status: 200 });
   } catch (err) {

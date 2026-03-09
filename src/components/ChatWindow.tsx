@@ -493,60 +493,83 @@ const ChatWindow = ({ id }: { id?: string }) => {
     // Get automatic search settings
     const autoImageSearch = localStorage.getItem('autoImageSearch') === 'true';
     const autoVideoSearch = localStorage.getItem('autoVideoSearch') === 'true';
-
-    const res = await fetch('/api/chat', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        message: {
-          messageId: messageId,
-          chatId: chatId!,
-          content: message,
+    try {
+      const res = await fetch('/api/chat', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
         },
-        optimizationMode: optimizationMode,
-        focusMode: focusMode,
-        history: rewrite
-          ? chatHistory.slice(0, messageIndex === -1 ? undefined : messageIndex)
-          : chatHistory,
-        files: fileIds,
-        chatModel: {
-          name: chatModelProvider.name,
-          provider: chatModelProvider.provider,
-        },
-        systemInstructions: localStorage.getItem('systemInstructions') || '',
-        maxSources: maxSources,
-        maxToken: maxToken,
-        includeImages: autoImageSearch,
-        includeVideos: autoVideoSearch,
-      }),
-    });
+        body: JSON.stringify({
+          message: {
+            messageId: messageId,
+            chatId: chatId!,
+            content: message,
+          },
+          optimizationMode: optimizationMode,
+          focusMode: focusMode,
+          history: rewrite
+            ? chatHistory.slice(
+                0,
+                messageIndex === -1 ? undefined : messageIndex,
+              )
+            : chatHistory,
+          files: fileIds,
+          chatModel: {
+            model: chatModelProvider.name,
+            provider: chatModelProvider.provider,
+          },
+          systemInstructions: localStorage.getItem('systemInstructions') || '',
+          maxSources: maxSources,
+          maxToken: maxToken,
+          includeImages: autoImageSearch,
+          includeVideos: autoVideoSearch,
+        }),
+      });
 
-    if (!res.body) throw new Error('No response body');
-
-    const reader = res.body?.getReader();
-    const decoder = new TextDecoder('utf-8');
-
-    let partialChunk = '';
-
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-
-      partialChunk += decoder.decode(value, { stream: true });
-
-      try {
-        const messages = partialChunk.split('\n');
-        for (const msg of messages) {
-          if (!msg.trim()) continue;
-          const json = JSON.parse(msg);
-          messageHandler(json);
-        }
-        partialChunk = '';
-      } catch (error) {
-        console.warn('Incomplete JSON, waiting for next chunk...');
+      if (!res.ok) {
+        const errorBody = await res.json().catch(() => null);
+        throw new Error(
+          errorBody?.error ||
+            errorBody?.message ||
+            `Request failed with status ${res.status}`,
+        );
       }
+
+      if (!res.body) throw new Error('No response body');
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      let partialChunk = '';
+
+      while (true) {
+        const { value, done } = await reader.read();
+
+        partialChunk += decoder.decode(value || new Uint8Array(), {
+          stream: !done,
+        });
+
+        const chunks = partialChunk.split('\n');
+        partialChunk = chunks.pop() ?? '';
+
+        for (const chunk of chunks) {
+          if (!chunk.trim()) continue;
+          await messageHandler(JSON.parse(chunk));
+        }
+
+        if (done) break;
+      }
+
+      if (partialChunk.trim()) {
+        await messageHandler(JSON.parse(partialChunk));
+      }
+    } catch (error) {
+      console.error('An error occurred while sending the message:', error);
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : 'An error occurred while sending the message',
+      );
+      setLoading(false);
     }
   };
 

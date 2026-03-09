@@ -11,13 +11,14 @@ import { createCustomModel, validateCustomModel } from '@/lib/providers/customMo
 
 interface chatModel {
   provider: string;
-  model: string;
+  model?: string;
+  name?: string;
   apiKey?: string;
   baseUrl?: string;
 }
 
 interface ChatRequestBody {
-  optimizationMode: 'speed' | 'balanced';
+  optimizationMode: 'speed' | 'balanced' | 'quality';
   focusMode: string;
   chatModel?: chatModel;
   query: string;
@@ -32,6 +33,40 @@ interface ChatRequestBody {
 
 // Hard-coded timeout limit for API responses (175 seconds)
 const API_RESPONSE_TIMEOUT_MS = 175000; // 175 seconds
+
+const getRequestedModelKey = (chatModel?: chatModel) =>
+  chatModel?.model || chatModel?.name;
+
+const getStreamErrorMessage = (error: unknown) => {
+  if (typeof error === 'string') {
+    try {
+      const parsed = JSON.parse(error);
+      if (typeof parsed?.data === 'string') {
+        return parsed.data;
+      }
+      if (typeof parsed?.message === 'string') {
+        return parsed.message;
+      }
+    } catch {
+      return error;
+    }
+  }
+
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  if (
+    typeof error === 'object' &&
+    error !== null &&
+    'message' in error &&
+    typeof (error as { message?: unknown }).message === 'string'
+  ) {
+    return (error as { message: string }).message;
+  }
+
+  return 'An error occurred while processing the search request';
+};
 
 export const POST = async (req: Request) => {
   try {
@@ -56,7 +91,12 @@ export const POST = async (req: Request) => {
       console.log('Focus Mode:', body.focusMode);
       console.log('Query:', body.query);
       console.log('Optimization:', body.optimizationMode || 'balanced');
-      console.log('Custom AI:', body.chatModel ? `${body.chatModel.provider}/${body.chatModel.model}` : 'default');
+      console.log(
+        'Custom AI:',
+        body.chatModel
+          ? `${body.chatModel.provider}/${getRequestedModelKey(body.chatModel)}`
+          : 'default',
+      );
       console.log('================================');
 
       // Re-parse body since we already consumed it
@@ -85,10 +125,10 @@ export const POST = async (req: Request) => {
     let llm: BaseChatModel | undefined;
 
     // Check if custom model configuration is provided
-    if (body.chatModel?.apiKey && body.chatModel?.model) {
+    if (body.chatModel?.apiKey && getRequestedModelKey(body.chatModel)) {
       const customConfig = {
         provider: body.chatModel.provider,
-        model: body.chatModel.model,
+        model: getRequestedModelKey(body.chatModel) || '',
         apiKey: body.chatModel.apiKey,
         baseUrl: body.chatModel.baseUrl,
       };
@@ -106,7 +146,7 @@ export const POST = async (req: Request) => {
       const chatModelProvider =
         body.chatModel?.provider || Object.keys(chatModelProviders)[0];
       const chatModel =
-        body.chatModel?.model ||
+        getRequestedModelKey(body.chatModel) ||
         Object.keys(chatModelProviders[chatModelProvider] || {})[0];
 
       if (
@@ -163,10 +203,7 @@ export const POST = async (req: Request) => {
 
     if (!body.stream) {
       return new Promise(
-        (
-          resolve: (value: Response) => void,
-          reject: (value: Response) => void,
-        ) => {
+        (resolve: (value: Response) => void) => {
           let message = '';
           let sources: any[] = [];
           let isResolved = false;
@@ -199,7 +236,7 @@ export const POST = async (req: Request) => {
               if (!isResolved) {
                 isResolved = true;
                 clearTimeout(timeoutId);
-                reject(
+                resolve(
                   Response.json(
                     { message: 'Error parsing data' },
                     { status: 500 },
@@ -221,9 +258,12 @@ export const POST = async (req: Request) => {
             if (!isResolved) {
               isResolved = true;
               clearTimeout(timeoutId);
-              reject(
+              resolve(
                 Response.json(
-                  { message: 'Search error', error },
+                  {
+                    message: 'Search error',
+                    error: getStreamErrorMessage(error),
+                  },
                   { status: 500 },
                 ),
               );
@@ -353,7 +393,15 @@ export const POST = async (req: Request) => {
 
           isStreamClosed = true;
           clearTimeout(timeoutId);
-          controller.error(error);
+          controller.enqueue(
+            encoder.encode(
+              JSON.stringify({
+                type: 'error',
+                data: getStreamErrorMessage(error),
+              }) + '\n',
+            ),
+          );
+          controller.close();
         });
       },
       cancel() {

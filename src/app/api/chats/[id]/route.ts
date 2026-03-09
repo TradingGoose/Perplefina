@@ -1,6 +1,5 @@
-import db from '@/lib/db';
-import { chats, messages } from '@/lib/db/schema';
 import { eq } from 'drizzle-orm';
+import { loadPersistence } from '@/lib/persistence';
 
 export const GET = async (
   req: Request,
@@ -8,17 +7,22 @@ export const GET = async (
 ) => {
   try {
     const { id } = await params;
+    const persistence = await loadPersistence();
 
-    const chatExists = await db.query.chats.findFirst({
-      where: eq(chats.id, id),
+    if (!persistence) {
+      return Response.json({ message: 'Chat not found' }, { status: 404 });
+    }
+
+    const chatExists = await persistence.db.query.chats.findFirst({
+      where: eq(persistence.chats.id, id),
     });
 
     if (!chatExists) {
       return Response.json({ message: 'Chat not found' }, { status: 404 });
     }
 
-    const chatMessages = await db.query.messages.findMany({
-      where: eq(messages.chatId, id),
+    const chatMessages = await persistence.db.query.messages.findMany({
+      where: eq(persistence.messages.chatId, id),
     });
 
     return Response.json(
@@ -43,17 +47,28 @@ export const DELETE = async (
 ) => {
   try {
     const { id } = await params;
+    const persistence = await loadPersistence();
 
-    const chatExists = await db.query.chats.findFirst({
-      where: eq(chats.id, id),
+    if (!persistence) {
+      return Response.json({ message: 'Chat not found' }, { status: 404 });
+    }
+
+    const chatExists = await persistence.db.query.chats.findFirst({
+      where: eq(persistence.chats.id, id),
     });
 
     if (!chatExists) {
       return Response.json({ message: 'Chat not found' }, { status: 404 });
     }
 
-    await db.delete(chats).where(eq(chats.id, id)).execute();
-    await db.delete(messages).where(eq(messages.chatId, id)).execute();
+    await persistence.db
+      .delete(persistence.chats)
+      .where(eq(persistence.chats.id, id))
+      .execute();
+    await persistence.db
+      .delete(persistence.messages)
+      .where(eq(persistence.messages.chatId, id))
+      .execute();
 
     return Response.json(
       { message: 'Chat deleted successfully' },

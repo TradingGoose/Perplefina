@@ -5,14 +5,13 @@ import {
   getAvailableChatModelProviders,
   getAvailableEmbeddingModelProviders,
 } from '@/lib/providers';
-import db from '@/lib/db';
-import { chats, messages as messagesSchema } from '@/lib/db/schema';
 import { and, eq, gt } from 'drizzle-orm';
 import { getFileDetails } from '@/lib/utils/files';
 import { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import type { Embeddings } from '@langchain/core/embeddings';
 import { searchHandlers } from '@/lib/search';
 import { createCustomModel, validateCustomModel } from '@/lib/providers/customModels';
+import { loadPersistence } from '@/lib/persistence';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -28,7 +27,8 @@ type Message = {
 
 type ChatModel = {
   provider: string;
-  model: string;
+  model?: string;
+  name?: string;
   apiKey?: string;
   baseUrl?: string;
 };
@@ -45,6 +45,40 @@ type Body = {
   maxToken?: number;
   includeImages?: boolean;
   includeVideos?: boolean;
+};
+
+const getRequestedModelKey = (chatModel?: ChatModel) =>
+  chatModel?.model || chatModel?.name;
+
+const getStreamErrorMessage = (data: unknown) => {
+  if (typeof data === 'string') {
+    try {
+      const parsed = JSON.parse(data);
+      if (typeof parsed?.data === 'string') {
+        return parsed.data;
+      }
+      if (typeof parsed?.message === 'string') {
+        return parsed.message;
+      }
+    } catch {
+      return data;
+    }
+  }
+
+  if (data instanceof Error) {
+    return data.message;
+  }
+
+  if (
+    typeof data === 'object' &&
+    data !== null &&
+    'message' in data &&
+    typeof (data as { message?: unknown }).message === 'string'
+  ) {
+    return (data as { message: string }).message;
+  }
+
+  return 'An error occurred while processing the chat request';
 };
 
 const handleEmitterEvents = async (
@@ -98,20 +132,26 @@ const handleEmitterEvents = async (
       
       // Save partial message to database
       if (recievedMessage) {
-        db.insert(messagesSchema)
-          .values({
-            content: recievedMessage + '\n\n[Response truncated due to timeout]',
-            chatId: chatId,
-            messageId: aiMessageId,
-            role: 'assistant',
-            metadata: JSON.stringify({
-              createdAt: new Date(),
-              partial: true,
-              timeout: true,
-              ...(sources && sources.length > 0 && { sources }),
-            }),
-          })
-          .execute();
+        void (async () => {
+          const persistence = await loadPersistence();
+          if (!persistence) return;
+
+          persistence.db
+            .insert(persistence.messages)
+            .values({
+              content: recievedMessage + '\n\n[Response truncated due to timeout]',
+              chatId: chatId,
+              messageId: aiMessageId,
+              role: 'assistant',
+              metadata: JSON.stringify({
+                createdAt: new Date(),
+                partial: true,
+                timeout: true,
+                ...(sources && sources.length > 0 && { sources }),
+              }),
+            })
+            .execute();
+        })();
       }
     }
   }, API_RESPONSE_TIMEOUT_MS);
@@ -188,18 +228,24 @@ const handleEmitterEvents = async (
 
     // Only save to DB if not already saved by timeout
     if (!writerClosed || recievedMessage) {
-      db.insert(messagesSchema)
-        .values({
-          content: recievedMessage,
-          chatId: chatId,
-          messageId: aiMessageId,
-          role: 'assistant',
-          metadata: JSON.stringify({
-            createdAt: new Date(),
-            ...(sources && sources.length > 0 && { sources }),
-          }),
-        })
-        .execute();
+      void (async () => {
+        const persistence = await loadPersistence();
+        if (!persistence) return;
+
+        persistence.db
+          .insert(persistence.messages)
+          .values({
+            content: recievedMessage,
+            chatId: chatId,
+            messageId: aiMessageId,
+            role: 'assistant',
+            metadata: JSON.stringify({
+              createdAt: new Date(),
+              ...(sources && sources.length > 0 && { sources }),
+            }),
+          })
+          .execute();
+      })();
     }
   });
   stream.on('error', (data) => {
@@ -207,13 +253,13 @@ const handleEmitterEvents = async (
     
     if (!writerClosed) {
       try {
-        const parsedData = JSON.parse(data);
+        const errorMessage = getStreamErrorMessage(data);
         writer.write(
           encoder.encode(
             JSON.stringify({
               type: 'error',
-              data: parsedData.data,
-            }),
+              data: errorMessage,
+            }) + '\n',
           ),
         ).then(() => {
           if (!writerClosed) {
@@ -240,13 +286,16 @@ const handleHistorySave = async (
   focusMode: string,
   files: string[],
 ) => {
-  const chat = await db.query.chats.findFirst({
-    where: eq(chats.id, message.chatId),
+  const persistence = await loadPersistence();
+  if (!persistence) return;
+
+  const chat = await persistence.db.query.chats.findFirst({
+    where: eq(persistence.chats.id, message.chatId),
   });
 
   if (!chat) {
-    await db
-      .insert(chats)
+    await persistence.db
+      .insert(persistence.chats)
       .values({
         id: message.chatId,
         title: message.content,
@@ -257,13 +306,13 @@ const handleHistorySave = async (
       .execute();
   }
 
-  const messageExists = await db.query.messages.findFirst({
-    where: eq(messagesSchema.messageId, humanMessageId),
+  const messageExists = await persistence.db.query.messages.findFirst({
+    where: eq(persistence.messages.messageId, humanMessageId),
   });
 
   if (!messageExists) {
-    await db
-      .insert(messagesSchema)
+    await persistence.db
+      .insert(persistence.messages)
       .values({
         content: message.content,
         chatId: message.chatId,
@@ -275,12 +324,12 @@ const handleHistorySave = async (
       })
       .execute();
   } else {
-    await db
-      .delete(messagesSchema)
+    await persistence.db
+      .delete(persistence.messages)
       .where(
         and(
-          gt(messagesSchema.id, messageExists.id),
-          eq(messagesSchema.chatId, message.chatId),
+          gt(persistence.messages.id, messageExists.id),
+          eq(persistence.messages.chatId, message.chatId),
         ),
       )
       .execute();
@@ -306,10 +355,10 @@ export const POST = async (req: Request) => {
     let llm: BaseChatModel | undefined;
 
     // Check if custom model configuration is provided
-    if (body.chatModel?.apiKey && body.chatModel?.model) {
+    if (body.chatModel?.apiKey && getRequestedModelKey(body.chatModel)) {
       const customConfig = {
         provider: body.chatModel.provider,
-        model: body.chatModel.model,
+        model: getRequestedModelKey(body.chatModel) || '',
         apiKey: body.chatModel.apiKey,
         baseUrl: body.chatModel.baseUrl,
       };
@@ -328,7 +377,8 @@ export const POST = async (req: Request) => {
         ];
       const chatModel =
         chatModelProvider?.[
-          body.chatModel?.model || Object.keys(chatModelProvider || {})[0]
+          getRequestedModelKey(body.chatModel) ||
+            Object.keys(chatModelProvider || {})[0]
         ];
       
       if (chatModelProvider && chatModel) {

@@ -19,6 +19,31 @@ interface SearxngSearchResult {
   iframe_src?: string;
 }
 
+const buildSearxngSearchUrl = (rawEndpoint: string) => {
+  const trimmedEndpoint = rawEndpoint.trim();
+
+  if (!trimmedEndpoint) {
+    throw new Error('SearXNG API endpoint is not configured.');
+  }
+
+  const endpoint = /^[a-zA-Z][a-zA-Z\d+.-]*:\/\//.test(trimmedEndpoint)
+    ? trimmedEndpoint
+    : `http://${trimmedEndpoint}`;
+
+  const url = new URL(endpoint);
+
+  // Accept either a base URL or one that already includes /search.
+  url.pathname = url.pathname.replace(/\/search\/?$/, '') || '/';
+
+  const basePath = url.pathname === '/' ? '' : url.pathname.replace(/\/$/, '');
+  url.pathname = `${basePath}/search`;
+  url.search = '';
+  url.hash = '';
+  url.searchParams.set('format', 'json');
+
+  return url;
+};
+
 // Finance-specific search query optimization
 const optimizeQueryForFinance = (query: string, engines?: string[]): string => {
   // If searching on specific platforms, add relevant finance terms
@@ -57,7 +82,7 @@ export const searchSearxng = async (
   opts?: SearxngSearchOptions,
 ) => {
   const searxngURL = getSearxngApiEndpoint();
-  
+
   // Optimize query for finance content
   const optimizedQuery = optimizeQueryForFinance(query, opts?.engines);
 
@@ -67,21 +92,21 @@ export const searchSearxng = async (
     return { results: [], suggestions: [] };
   }
 
-  const url = new URL(`${searxngURL}/search?format=json`);
-  url.searchParams.append('q', optimizedQuery);
-
-  if (opts) {
-    Object.keys(opts).forEach((key) => {
-      const value = opts[key as keyof SearxngSearchOptions];
-      if (Array.isArray(value)) {
-        url.searchParams.append(key, value.join(','));
-        return;
-      }
-      url.searchParams.append(key, value as string);
-    });
-  }
-
   try {
+    const url = buildSearxngSearchUrl(searxngURL);
+    url.searchParams.append('q', optimizedQuery);
+
+    if (opts) {
+      Object.keys(opts).forEach((key) => {
+        const value = opts[key as keyof SearxngSearchOptions];
+        if (Array.isArray(value)) {
+          url.searchParams.append(key, value.join(','));
+          return;
+        }
+        url.searchParams.append(key, value as string);
+      });
+    }
+
     const res = await axios.get(url.toString(), {
       headers: {
         'Accept': 'application/json',
